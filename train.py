@@ -8,6 +8,8 @@ from sklearn.preprocessing import FunctionTransformer, StandardScaler
 from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
+from catboost import CatBoostClassifier
+
 
 from sklearn.metrics import (average_precision_score, roc_auc_score, confusion_matrix, classification_report, precision_recall_curve)
 
@@ -93,7 +95,7 @@ def plot_score_hist(y_true, proba):
     plt.figure()
     plt.hist(proba[y_true==0], bins=50, alpha=0.7, label="Legit")
     plt.hist(proba[y_true==1], bins=50, alpha=0.7, label="Fraud")
-    plt.xlabel("Predicted fraud probability")
+    plt.xlabel("Предсказанная fraud proba")
     plt.ylabel("Count")
     plt.title("Score distributions (Test)")
     plt.legend()
@@ -119,16 +121,24 @@ def plot_pr_curve_with_point(y_true, proba, thr):
     plt.scatter([r_at], [p_at])
     plt.xlabel("Recall")
     plt.ylabel("Precision")
-    plt.title("PR curve (Test) + chosen threshold point")
+    plt.title("PR curve (Test)")
     plt.grid(True)
     plt.show()
+
+def calc_loss(y_true, proba, thr, cost_fp, cost_fn):
+    """
+    Посчитаем потери банка на fraud
+    """
+    pred=(proba>=thr)
+    tn, fp, fn, tp = confusion_matrix(y_true, pred).ravel()
+    loss = cost_fp * fp + cost_fn * fn
+    return loss, fp, fn, tp, tn
 
 
 def main():
     df=load_data(DATA_PATH)
 
     print("Data shape:", df.shape)
-    print("Class share:\n", df["Class"].value_counts(normalize=True))
 
     X_train, X_test, y_train, y_test = time_based_split(df, TEST_SIZE)
 
@@ -162,6 +172,24 @@ def main():
                 class_weight="balanced_subsample"
             )],
             "clf__n_estimators": [200, 400],
+        },
+        # {
+        #     "clf": [RandomForestClassifier(
+        #         random_state=RANDOM_STATE,
+        #         n_jobs=-1,
+        #         class_weight="balanced_subsample"
+        #     )],
+        #     "clf__max_depth": [None, 10, 20],
+        # }
+        {
+            "clf": [CatBoostClassifier(
+                random_seed=RANDOM_STATE,
+                verbose=False,
+                loss_function="Logloss"
+            )],
+            "clf__depth": [4, 6, 8],
+            "clf__learning_rate": [0.03, 0.1],
+            "clf__iterations": [300, 600],
         }
     ]
 
@@ -178,8 +206,7 @@ def main():
     gs.fit(X_train, y_train)
 
     best_model=gs.best_estimator_
-    print("\nBest params:", gs.best_params_)
-    print("Best CV PR-AUC:", gs.best_score_)
+    print("Лучшая CV PR-AUC:", gs.best_score_)
 
     proba_test=best_model.predict_proba(X_test)[:,1]
 
@@ -189,14 +216,24 @@ def main():
         else porog_by_fpr(y_test, proba_test, MAX_FPR)
     )
 
-    evaluate(y_test, proba_test, thr, "Best pipeline (GridSearch)")
+    evaluate(y_test, proba_test, thr, "Модель, найденная GridSearch")
     plot_recall_vs_fpr(y_test, proba_test)
     plot_score_hist(y_test, proba_test)
     plot_pr_curve_with_point(y_test, proba_test, thr)
 
     joblib.dump({"model": best_model, "threshold": thr}, OUT_BEST)
-    print("Saved:", OUT_BEST)
+    print("Сохранено в:", OUT_BEST)
 
+    cost_fp = 0.09
+    cost_fn = 9.25
+
+    pred=(proba_test>=thr)
+    tn, fp, fn, tp =confusion_matrix(y_test, pred).ravel()
+    loss=cost_fp*fp+cost_fn*fn
+
+    print("\nПотери: ", loss)
+    print("FP:", fp, "FN:", fn, "TP:", tp, "TN:", tn)
 
 if __name__ == "__main__":
     main()
+
